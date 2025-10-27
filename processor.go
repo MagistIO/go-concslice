@@ -2,6 +2,8 @@ package concslice
 
 import (
 	"context"
+	"fmt"
+	"sync"
 )
 
 type (
@@ -31,13 +33,15 @@ func Process[Item any, State any](ctx context.Context, items []Item, handler fun
 		return t
 	}
 	t.initialize(ctx, options)
+	wg := sync.WaitGroup{}
+	wg.Add(t.maxWorkers)
 	for i := range t.maxWorkers {
 		go func(index int) {
 			defer func() {
 				if err := recover(); err != nil {
-					// TODO: collect panic error
+					t.collectPanicError(fmt.Errorf("panic in worker %d: %v", index, err))
 				}
-				t.wg.Done()
+				wg.Done()
 			}()
 			for i := index; i < t.itemsCount; i += t.maxWorkers {
 				if err := t.ctx.Err(); err != nil {
@@ -48,7 +52,10 @@ func Process[Item any, State any](ctx context.Context, items []Item, handler fun
 			}
 		}(i)
 	}
-	go t.wait()
+	go func() {
+		wg.Wait()
+		t.finish()
+	}()
 	return t
 }
 
@@ -58,7 +65,7 @@ func WithMaxWorkers[State any](concurrency int) Option[State] {
 	}
 }
 
-func WithOnFinish[State any](onFinish func(State)) Option[State] {
+func WithOnFinish[State any](onFinish func(Result[State])) Option[State] {
 	return func(p *Task[State]) {
 		p.onFinish = onFinish
 	}

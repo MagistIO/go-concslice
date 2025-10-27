@@ -2,20 +2,22 @@ package concslice
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
 type Task[State any] struct {
 	ctx            context.Context
 	cancel         func()
-	wg             *sync.WaitGroup
-	processedCount int
+	processedCount int64
 	itemsCount     int
 	maxWorkers     int
-	onFinish       func(State)
+	onFinish       func(Result[State])
 	done           chan struct{}
 	mu             sync.Mutex
+	result         Result[State]
 
 	State State
 }
@@ -24,6 +26,8 @@ type Result[State any] struct {
 	State          State
 	ProcessedCount int
 	IsCanceled     bool
+	IsFinished     bool
+	Errors         []error
 }
 
 func (t *Task[State]) Context() context.Context {
@@ -34,34 +38,23 @@ func (t *Task[State]) Cancel() {
 	t.cancel()
 }
 
-func (t *Task[State]) Wait() *Result[State] {
-	if t.wg == nil {
-		isCanceled := false
-		if t.ctx != nil && t.ctx.Err() != nil {
-			isCanceled = true
-		}
-		return &Result[State]{
-			State:          t.State,
-			ProcessedCount: t.processedCount,
-			IsCanceled:     isCanceled,
-		}
-	}
-	t.wg.Wait()
+func (t *Task[State]) Wait() Result[State] {
 	t.mu.Lock()
 	done := t.done
-	defer t.mu.Unlock()
-	if done != nil {
-		<-done
+	t.mu.Unlock()
+	if done == nil {
+		return t.result
 	}
-	return &Result[State]{
-		State:          t.State,
-		ProcessedCount: t.processedCount,
-		IsCanceled:     t.ctx.Err() != nil,
-	}
+	<-done
+	return t.result
 }
 
 func (t *Task[State]) MaxWorkers() int {
 	return t.maxWorkers
+}
+
+func (t *Task[State]) ProcessedCount() int {
+	return int(atomic.LoadInt64(&t.processedCount))
 }
 
 func (t *Task[State]) initialize(ctx context.Context, options []Option[State]) {
@@ -73,41 +66,37 @@ func (t *Task[State]) initialize(ctx context.Context, options []Option[State]) {
 	}
 	t.maxWorkers = min(t.itemsCount, t.maxWorkers)
 	t.ctx, t.cancel = context.WithCancel(ctx)
-	t.wg = &sync.WaitGroup{}
-	t.wg.Add(t.maxWorkers)
 	t.done = make(chan struct{})
 }
 
-func (t *Task[State]) wait() {
-	t.wg.Wait()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.done != nil {
-		defer func() {
-			close(t.done)
-			t.done = nil
-		}()
-	}
-	t.cancel()
-	t.finish()
-	t.wg = nil
-	t.cancel = nil
-}
-
 func (t *Task[State]) finish() {
+	t.mu.Lock()
+	defer func() {
+		close(t.done)
+		t.done = nil
+		t.mu.Unlock()
+	}()
+	t.result.State = t.State
+	t.result.ProcessedCount = int(t.processedCount)
+	t.result.IsCanceled = t.ctx.Err() != nil
+	t.result.IsFinished = true
+	t.cancel()
 	if t.onFinish != nil {
 		defer func() {
 			if err := recover(); err != nil {
-				// TODO: collect panic error
+				t.result.Errors = append(t.result.Errors, fmt.Errorf("panic in onFinish callback: %v", err))
 			}
 		}()
-		t.onFinish(t.State)
-		t.onFinish = nil
+		t.onFinish(t.result)
 	}
 }
 
-func (t *Task[State]) incrementCounter() {
+func (t *Task[State]) collectPanicError(err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.processedCount++
+	t.result.Errors = append(t.result.Errors, err)
+}
+
+func (t *Task[State]) incrementCounter() {
+	atomic.AddInt64(&t.processedCount, 1)
 }

@@ -2,6 +2,7 @@ package concslice
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -18,7 +19,7 @@ func TestProcess(t *testing.T) {
 		ctx     context.Context
 		items   []T
 		handler func(pc *Task[T], item T)
-		check   func(t *testing.T, got *Result[T])
+		check   func(t *testing.T, got Result[T])
 		options []Option[T]
 	}
 	tests := []testCase[int64]{
@@ -29,7 +30,7 @@ func TestProcess(t *testing.T) {
 			handler: func(pc *Task[int64], item int64) {
 				pc.State += item
 			},
-			check: func(t *testing.T, got *Result[int64]) {
+			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
 			},
 			options: []Option[int64]{
@@ -43,7 +44,7 @@ func TestProcess(t *testing.T) {
 			handler: func(pc *Task[int64], item int64) {
 				atomic.AddInt64(&pc.State, item)
 			},
-			check: func(t *testing.T, got *Result[int64]) {
+			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(1000), got.State, "Expected state to be 1000")
 			},
 		},
@@ -54,7 +55,7 @@ func TestProcess(t *testing.T) {
 			handler: func(pc *Task[int64], item int64) {
 				atomic.AddInt64(&pc.State, item)
 			},
-			check: func(t *testing.T, got *Result[int64]) {
+			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
 			},
 		},
@@ -65,7 +66,7 @@ func TestProcess(t *testing.T) {
 			handler: func(pc *Task[int64], item int64) {
 				atomic.AddInt64(&pc.State, item)
 			},
-			check: func(t *testing.T, got *Result[int64]) {
+			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(0), got.State, "Expected state to be 0")
 			},
 		},
@@ -76,7 +77,7 @@ func TestProcess(t *testing.T) {
 			handler: func(pc *Task[int64], item int64) {
 				atomic.AddInt64(&pc.State, item)
 			},
-			check: func(t *testing.T, got *Result[int64]) {
+			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
 			},
 			options: []Option[int64]{
@@ -151,8 +152,8 @@ func TestProcessConcurrentlyWithOnCompleteHook(t *testing.T) {
 			atomic.AddInt64(&pc.State.Sum, int64(item))
 		},
 		WithState(&testStateWithOnCompleteHook{}),
-		WithOnFinish(func(state *testStateWithOnCompleteHook) {
-			state.Completed = true
+		WithOnFinish(func(state Result[*testStateWithOnCompleteHook]) {
+			state.State.Completed = true
 		}),
 	).Wait()
 
@@ -232,4 +233,263 @@ func TestProcessConcurrentlyWithTimeout(t *testing.T) {
 	assert.NotEqual(t, len(items), got.ProcessedCount, "Expected processing to be canceled due to timeout")
 	assert.Greater(t, got.State, int64(0), "Expected state to be greater than 0")
 	assert.Less(t, got.State, int64(1000), "Expected state to be less than 1000")
+}
+
+func TestNewProcessor(t *testing.T) {
+	handler := func(pc *Task[int64], item int64) {
+		atomic.AddInt64(&pc.State, item)
+	}
+
+	processor := NewProcessor(handler, WithMaxWorkers[int64](2))
+	require.NotNil(t, processor, "Expected processor to be created")
+
+	items := []int64{1, 2, 3, 4, 5}
+	got := processor.Process(context.Background(), items).Wait()
+
+	assert.Equal(t, int64(15), got.State, "Expected state to be 15")
+	assert.Equal(t, 5, got.ProcessedCount, "Expected processed count to be 5")
+	assert.True(t, got.IsFinished, "Expected task to be finished")
+	assert.False(t, got.IsCanceled, "IsCanceled should have some value")
+}
+
+func TestProcessorWithOptions(t *testing.T) {
+	type Counter struct {
+		Sum int64
+	}
+
+	handler := func(pc *Task[Counter], item int64) {
+		atomic.AddInt64(&pc.State.Sum, item)
+	}
+
+	var finalSum int64
+	processor := NewProcessor(
+		handler,
+		WithMaxWorkers[Counter](1),
+		WithState(Counter{}),
+		WithOnFinish(func(result Result[Counter]) {
+			finalSum = result.State.Sum * 2 // Store doubled sum
+		}),
+	)
+
+	items := []int64{1, 2, 3}
+	got := processor.Process(context.Background(), items).Wait()
+
+	assert.Equal(t, int64(6), got.State.Sum, "Expected sum to be 6")
+	assert.Equal(t, int64(12), finalSum, "Expected doubled sum to be 12")
+	assert.Equal(t, 3, got.ProcessedCount, "Expected processed count to be 3")
+}
+
+func TestWithStateFunc(t *testing.T) {
+	type DynamicState struct {
+		Initialized bool
+		Value       int64
+	}
+
+	handler := func(pc *Task[DynamicState], item int64) {
+		atomic.AddInt64(&pc.State.Value, item)
+	}
+
+	got := Process(
+		context.Background(),
+		[]int64{1, 2, 3},
+		handler,
+		WithStateFunc(func(t *Task[DynamicState]) DynamicState {
+			return DynamicState{
+				Initialized: true,
+				Value:       100, // Start with 100
+			}
+		}),
+	).Wait()
+
+	assert.True(t, got.State.Initialized, "Expected state to be initialized")
+	assert.Equal(t, int64(106), got.State.Value, "Expected value to be 106 (100 + 1 + 2 + 3)")
+	assert.Equal(t, 3, got.ProcessedCount, "Expected processed count to be 3")
+}
+
+func TestPanicHandlingInHandler(t *testing.T) {
+	items := []int64{1, 2, 3}
+	got := Process(
+		context.Background(),
+		items,
+		func(pc *Task[int64], item int64) {
+			if item == 2 {
+				panic("test panic")
+			}
+			atomic.AddInt64(&pc.State, item)
+		},
+	).Wait()
+
+	assert.Equal(t, int64(4), got.State, "Expected state to be 4 (1 + 3)")
+	assert.Equal(t, 2, got.ProcessedCount, "Expected processed count to be 2")
+	assert.True(t, got.IsFinished, "Expected task to be finished")
+	assert.Len(t, got.Errors, 1, "Expected one panic error")
+	assert.Contains(t, got.Errors[0].Error(), "panic in worker", "Expected panic error message")
+}
+
+func TestPanicHandlingInOnFinish(t *testing.T) {
+	type TestState struct {
+		Value int64
+	}
+
+	got := Process(
+		context.Background(),
+		[]int64{1, 2, 3},
+		func(pc *Task[TestState], item int64) {
+			atomic.AddInt64(&pc.State.Value, item)
+		},
+		WithState(TestState{}),
+		WithOnFinish(func(result Result[TestState]) {
+			panic("onFinish panic")
+		}),
+	).Wait()
+
+	assert.Equal(t, int64(6), got.State.Value, "Expected state value to be 6")
+	assert.Equal(t, 3, got.ProcessedCount, "Expected processed count to be 3")
+	assert.True(t, got.IsFinished, "Expected task to be finished")
+	assert.Len(t, got.Errors, 1, "Expected one panic error")
+	assert.Contains(t, got.Errors[0].Error(), "panic in onFinish callback", "Expected onFinish panic error message")
+}
+
+func TestTaskMethods(t *testing.T) {
+	items := []int64{1, 2, 3, 4, 5}
+	task := Process(
+		context.Background(),
+		items,
+		func(pc *Task[int64], item int64) {
+			atomic.AddInt64(&pc.State, item)
+			time.Sleep(5 * time.Millisecond) // Longer sleep to ensure cancel works
+		},
+		WithMaxWorkers[int64](1), // Single worker to make timing more predictable
+	)
+
+	// Test Context method
+	ctx := task.Context()
+	assert.NotNil(t, ctx, "Expected context to be non-nil")
+
+	// Test MaxWorkers method
+	assert.Equal(t, 1, task.MaxWorkers(), "Expected max workers to be 1")
+
+	// Test ProcessedCount method during processing
+	time.Sleep(2 * time.Millisecond) // Let some processing happen
+	count := task.ProcessedCount()
+	assert.GreaterOrEqual(t, count, 0, "Expected processed count to be non-negative")
+	assert.LessOrEqual(t, count, len(items), "Expected processed count to be less than or equal to items count")
+
+	// Test Cancel method
+	task.Cancel()
+
+	// Wait for completion
+	result := task.Wait()
+	assert.True(t, result.IsFinished, "Expected task to be finished")
+	assert.Less(t, result.ProcessedCount, len(items), "Expected some items to be processed before cancel")
+}
+
+func TestTaskMethodsWithEmptyItems(t *testing.T) {
+	task := Process(
+		context.Background(),
+		[]int64{},
+		func(pc *Task[int64], item int64) {
+			atomic.AddInt64(&pc.State, item)
+		},
+	)
+
+	// For empty items, task is not initialized and finish() is not called
+	result := task.Wait()
+	assert.Equal(t, int64(0), result.State, "Expected state to be 0")
+	assert.Equal(t, 0, result.ProcessedCount, "Expected processed count to be 0")
+	assert.False(t, result.IsFinished, "Expected task not to be finished (no finish() called)")
+	assert.False(t, result.IsCanceled, "Expected task not to be canceled")
+}
+
+func TestEdgeCases(t *testing.T) {
+	t.Run("negative concurrency", func(t *testing.T) {
+		// Negative concurrency should cause panic due to WaitGroup.Add with negative value
+		assert.Panics(t, func() {
+			Process(
+				context.Background(),
+				[]int64{1, 2, 3},
+				func(pc *Task[int64], item int64) {
+					atomic.AddInt64(&pc.State, item)
+				},
+				WithMaxWorkers[int64](-1),
+			).Wait()
+		}, "Expected panic with negative concurrency")
+	})
+
+	t.Run("concurrency greater than items count", func(t *testing.T) {
+		got := Process(
+			context.Background(),
+			[]int64{1, 2},
+			func(pc *Task[int64], item int64) {
+				atomic.AddInt64(&pc.State, item)
+			},
+			WithMaxWorkers[int64](10),
+		).Wait()
+
+		assert.Equal(t, int64(3), got.State, "Expected state to be 3")
+		assert.Equal(t, 2, got.ProcessedCount, "Expected processed count to be 2")
+	})
+
+	t.Run("nil handler", func(t *testing.T) {
+		// This should not panic, but handler won't be called and ProcessedCount won't increment
+		got := Process[int64, int64](
+			context.Background(),
+			[]int64{1, 2, 3},
+			nil,
+		).Wait()
+
+		assert.Equal(t, int64(0), got.State, "Expected state to be 0")
+		assert.Equal(t, 0, got.ProcessedCount, "Expected processed count to be 0 (no incrementCounter calls)")
+	})
+}
+
+func TestErrorCollection(t *testing.T) {
+	items := []int64{1, 2, 3, 4, 5}
+	got := Process(
+		context.Background(),
+		items,
+		func(pc *Task[int64], item int64) {
+			if item == 2 || item == 4 {
+				panic(fmt.Sprintf("panic for item %d", item))
+			}
+			atomic.AddInt64(&pc.State, item)
+		},
+	).Wait()
+
+	assert.Equal(t, int64(9), got.State, "Expected state to be 9 (1 + 3 + 5)")
+	assert.Equal(t, 3, got.ProcessedCount, "Expected processed count to be 3")
+	assert.Len(t, got.Errors, 2, "Expected two panic errors")
+
+	// Check that both panic errors are present (order is not guaranteed)
+	errorMessages := make([]string, len(got.Errors))
+	for i, err := range got.Errors {
+		errorMessages[i] = err.Error()
+	}
+	assert.Contains(t, errorMessages, "panic in worker 1: panic for item 2", "Expected panic for item 2")
+	assert.Contains(t, errorMessages, "panic in worker 3: panic for item 4", "Expected panic for item 4")
+}
+
+func TestConcurrentAccessToTaskState(t *testing.T) {
+	type Counter struct {
+		Value int64
+		mu    sync.Mutex
+	}
+
+	items := slices.Repeat([]int64{1}, 1000)
+	got := Process(
+		context.Background(),
+		items,
+		func(pc *Task[Counter], item int64) {
+			pc.State.mu.Lock()
+			pc.State.Value += item
+			pc.State.mu.Unlock()
+		},
+		WithMaxWorkers[Counter](10),
+	).Wait()
+
+	assert.Equal(t, int64(1000), got.State.Value, "Expected value to be 1000")
+	assert.Equal(t, 1000, got.ProcessedCount, "Expected processed count to be 1000")
+	assert.True(t, got.IsFinished, "Expected task to be finished")
+	assert.False(t, got.IsCanceled, "IsCanceled should be false")
+	assert.Empty(t, got.Errors, "Expected no errors")
 }
