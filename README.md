@@ -1,107 +1,172 @@
 # go-concslice
 Go library for parallel slice processing with context support, state management, and configurable concurrency. Easy worker control.
 
-### Основные возможности
+## Key Features
 
-#### Параллельная обработка
-- **Генерализованная обработка слайсов**: Поддержка любых типов данных через Go generics
-- **Автоматическое управление воркерами**: Автоматическое определение оптимального количества воркеров (GOMAXPROCS)
-- **Потокобезопасность**: Все операции синхронизированы с использованием sync.Mutex
+### Parallel Processing
+- **Generic slice processing**: Support for any data types through Go generics
+- **Automatic worker management**: Automatic determination of optimal number of workers (GOMAXPROCS)
 
-#### Управление состоянием
-- **Встроенное состояние**: Поддержка пользовательского состояния с типизацией
-- **Атомарные операции**: Безопасные операции с состоянием в многопоточной среде
-- **Callback функции**: Возможность выполнения кода при завершении обработки
+### State Management
+- **Built-in state**: Support for custom state with type safety
+- **Callback functions**: Ability to execute code upon completion of processing
 
-#### Контекстная поддержка
-- **Отмена операций**: Полная интеграция с Go context для отмены
-- **Таймауты**: Поддержка контекстных таймаутов
-- **Graceful shutdown**: Корректное завершение работы воркеров
+### Context Support
+- **Operation cancellation**: Full integration with Go context for cancellation
+- **Timeouts**: Support for context timeouts
+- **Graceful shutdown**: Proper worker termination
 
-### API функции
+## API Functions
 
-#### Основные функции
-- `Process[Item, State]()` - запуск параллельной обработки элементов слайса
-- `NewProcessor[Item, State]()` - создание процессора с предустановленными настройками
+### Core Functions
+- `Process[Item, State]()` - starts parallel processing of slice elements
+- `NewProcessor[Item, State]()` - creates a processor with pre-configured settings
 
-#### Управление задачами
-- `Wait()` - ожидание завершения обработки с возвратом Result
-- `Cancel()` - отмена текущей обработки
-- `Context()` - получение контекста задачи
+### Task Management
+- `Wait()` - waits for processing completion and returns Result
+- `Cancel()` - cancels current processing
+- `Context()` - gets the task context
 
-#### Информация о состоянии
-- `ProcessedCount` - количество обработанных элементов (через Result)
-- `MaxWorkers()` - максимальное количество воркеров
-- `IsCanceled` - статус отмены (через Result)
+### State Information
+- `ProcessedCount` - number of processed elements (via Result)
+- `MaxWorkers()` - maximum number of workers
+- `IsCanceled` - cancellation status (via Result)
 
-#### Настройки (Options)
-- `WithMaxWorkers[State](concurrency int)` - установка количества воркеров
-- `WithOnFinish[State](onFinish func(State))` - callback при завершении
-- `WithState[State](state State)` - установка начального состояния
-- `WithStateFunc[State](fn func(*Task[State]) State)` - установка состояния через функцию
+### Configuration Options
+- `WithMaxWorkers[State](concurrency int)` - sets the number of workers
+- `WithOnFinish[State](onFinish func(*Result[State]))` - callback on completion
+- `WithState[State](state State)` - sets initial state
+- `WithStateFunc[State](fn func(*Task[State]) State)` - sets state via function
 
-### Технические детали
+## Technical Details
 
-#### Структуры данных
-- **`Task[State]`** - основная структура задачи с состоянием
-- **`Result[State]`** - результат обработки с состоянием и метаданными
-- **`Processor[Item, State]`** - процессор с предустановленными настройками
+### Data Structures
+- **`Task[State]`** - main task structure with state
+- **`Result[State]`** - processing result with state and metadata
+- **`Processor[Item, State]`** - processor with pre-configured settings
 
-#### Обработка ошибок
-- **Recovery от паник**: Встроенная обработка паник в воркерах
-- **Graceful degradation**: Корректная обработка пустых слайсов
-- **Контекстные ошибки**: Обработка ошибок контекста (отмена, таймаут)
+### Error Handling
+- **Panic recovery**: Built-in panic handling in workers
+- **Graceful degradation**: Proper handling of empty slices
+- **Context errors**: Handling of context errors (cancellation, timeout)
 
-#### Производительность
-- **Оптимизация воркеров**: Автоматическое ограничение количества воркеров размером слайса
-- **Эффективная синхронизация**: Минимальное использование блокировок
-- **Память**: Эффективное управление памятью с автоматической очисткой ресурсов
 
-### Тестирование
+## Usage Examples
 
-#### Покрытие тестами
-- **Базовые сценарии**: Обработка с одним и несколькими воркерами
-- **Граничные случаи**: Пустые слайсы, нулевая параллельность
-- **Отмена операций**: Тестирование отмены через контекст и Cancel()
-- **Таймауты**: Тестирование обработки таймаутов
-- **Различные типы**: Тестирование с разными типами данных (int64, string, struct)
-
-#### Тестовые сценарии
-- Суммирование элементов с одним воркером
-- Параллельная обработка 1000 элементов
-- Обработка слайсов меньше количества воркеров
-- Обработка пустых слайсов
-- Отмена через контекст
-- Отмена через Cancel()
-- Callback функции при завершении
-- Обработка различных типов данных
-- Обработка строковых данных
-- Таймауты обработки
-
-### Примеры использования
+### Basic Usage
 
 ```go
-// Простая обработка с суммированием
-result := Process(ctx, items, func(task *Task[int], item int) {
-    task.State += item
-}, WithMaxWorkers[int](4))
+// Simple processing with summation
+result := Process(ctx, items, func(task *Task[int64], item int64) {
+    atomic.AddInt64(&task.State, item)
+}).Wait()
 
-// С callback при завершении
+// With completion callback
 result := Process(ctx, items, handler, 
-    WithOnFinish[int](func(state int) {
-        fmt.Printf("Обработано элементов: %d\n", state)
-    }))
+    WithOnFinish(func(result *Result[int64]) {
+        if result.IsCompleted {
+            fmt.Printf("Processed elements: %d\n", result.State)
+        } else {
+            fmt.Printf("Processing was canceled or timed out\n")
+        }
+    })).Wait()
 
-// Обработка пользовательских типов
+// Processing custom types
 type Person struct { Name string; Age int }
-type Stats struct { TotalAge int }
+type Stats struct { TotalAge int64 }
 
 people := []Person{{"Alice", 25}, {"Bob", 30}}
 result := Process(ctx, people, func(task *Task[Stats], person Person) {
-    task.State.TotalAge += person.Age
-})
+    atomic.AddInt64(&task.State.TotalAge, int64(person.Age))
+}).Wait()
 ```
 
-### Зависимости
-- **Go 1.23+** - минимальная версия Go
-- **github.com/stretchr/testify v1.11.1** - для тестирования
+### Advanced Usage
+
+```go
+// Using Processor for reusable processing
+processor := NewProcessor(
+    func(task *Task[map[string]int], word string) {
+        task.WithLock(func() {
+            task.State[word]++
+        })
+    },
+    WithState(map[string]int{}),
+)
+
+// Process multiple batches
+for _, batch := range batches {
+    result := processor.Process(ctx, batch).Wait()
+    fmt.Printf("Processed %d words\n", result.ProcessedCount)
+}
+
+// Dynamic state initialization
+result := Process(ctx, items, handler,
+    WithStateFunc(func(t *Task[Counter]) Counter {
+        return Counter{
+            StartTime: time.Now(),
+            MaxWorkers: t.MaxWorkers(),
+        }
+    }),
+)
+```
+
+### Panic Handling
+
+```go
+result := Process(ctx, items, func(task *Task[int], item int) {
+    if item < 0 {
+        panic(fmt.Sprintf("negative item: %d", item))
+    }
+    task.State += item
+},
+WithOnFinish(func(result *Result[int]) {
+    panic("onFinish panic")
+}),
+).Wait()
+
+if len(result.Errors) > 0 {
+    fmt.Printf("Processing completed with %d errors\n", len(result.Errors))
+    for _, err := range result.Errors {
+        fmt.Printf("Error: %v\n", err)
+    }
+}
+```
+
+### Cancellation and Timeouts
+
+```go
+// With timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+result := Process(ctx, items, handler).Wait()
+if result.IsCanceled {
+    fmt.Println("Processing was canceled due to timeout")
+}
+
+// Manual cancellation
+task := Process(ctx, items, handler)
+go func() {
+    time.Sleep(2*time.Second)
+    task.Cancel()
+}()
+result := task.Wait()
+```
+
+## Best Practices
+
+### State Management
+- **Use atomic operations** for simple counters and flags
+- **Use mutexes** for complex state modifications
+- **Initialize state properly** using `WithState` or `WithStateFunc`
+
+### Error Handling
+- **Handle panics gracefully** - they are automatically caught and stored in `Result.Errors`
+- **Check for context cancellation** in long-running handlers
+- **Validate input data** before processing
+
+### Performance Optimization
+- **Choose appropriate worker count** - usually `runtime.GOMAXPROCS(0)` is optimal
+- **Use Processor for repeated operations** to avoid reconfiguration overhead
+- **Consider memory usage** for large slices and complex state

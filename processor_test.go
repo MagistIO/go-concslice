@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ func TestProcess(t *testing.T) {
 		name    string
 		ctx     context.Context
 		items   []T
-		handler func(pc *Task[T], item T)
+		handler func(task *Task[T], item T)
 		check   func(t *testing.T, got Result[T])
 		options []Option[T]
 	}
@@ -27,8 +26,8 @@ func TestProcess(t *testing.T) {
 			name:  "sum of items on one worker",
 			ctx:   context.Background(),
 			items: []int64{1, 2, 3},
-			handler: func(pc *Task[int64], item int64) {
-				pc.State += item
+			handler: func(task *Task[int64], item int64) {
+				task.State += item
 			},
 			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
@@ -41,8 +40,8 @@ func TestProcess(t *testing.T) {
 			name:  "sum of items on more workers",
 			ctx:   context.Background(),
 			items: slices.Repeat([]int64{1}, 1000),
-			handler: func(pc *Task[int64], item int64) {
-				atomic.AddInt64(&pc.State, item)
+			handler: func(task *Task[int64], item int64) {
+				atomic.AddInt64(&task.State, item)
 			},
 			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(1000), got.State, "Expected state to be 1000")
@@ -52,8 +51,8 @@ func TestProcess(t *testing.T) {
 			name:  "items less than concurrency",
 			ctx:   context.Background(),
 			items: []int64{1, 2, 3},
-			handler: func(pc *Task[int64], item int64) {
-				atomic.AddInt64(&pc.State, item)
+			handler: func(task *Task[int64], item int64) {
+				atomic.AddInt64(&task.State, item)
 			},
 			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
@@ -63,8 +62,8 @@ func TestProcess(t *testing.T) {
 			name:  "empty items slice",
 			ctx:   context.Background(),
 			items: []int64{},
-			handler: func(pc *Task[int64], item int64) {
-				atomic.AddInt64(&pc.State, item)
+			handler: func(task *Task[int64], item int64) {
+				atomic.AddInt64(&task.State, item)
 			},
 			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(0), got.State, "Expected state to be 0")
@@ -74,8 +73,8 @@ func TestProcess(t *testing.T) {
 			name:  "zero concurrency",
 			ctx:   context.Background(),
 			items: []int64{1, 2, 3},
-			handler: func(pc *Task[int64], item int64) {
-				atomic.AddInt64(&pc.State, item)
+			handler: func(task *Task[int64], item int64) {
+				atomic.AddInt64(&task.State, item)
 			},
 			check: func(t *testing.T, got Result[int64]) {
 				require.Equal(t, int64(6), got.State, "Expected state to be 6")
@@ -103,9 +102,9 @@ func TestProcessWithContextCancellation(t *testing.T) {
 	got := Process(
 		ctx,
 		items,
-		func(pc *Task[int64], item int64) {
+		func(task *Task[int64], item int64) {
 			atomic.AddInt64(&processedCount, 1)
-			if atomic.AddInt64(&pc.State, item) > 100 {
+			if atomic.AddInt64(&task.State, item) > 100 {
 				cancel()
 			}
 		},
@@ -124,11 +123,11 @@ func TestProcessAbort(t *testing.T) {
 	got := Process(
 		context.Background(),
 		items,
-		func(pc *Task[int64], item int64) {
+		func(task *Task[int64], item int64) {
 			if atomic.AddInt64(&processedCount, 1) > 50 {
-				pc.Cancel()
+				task.Cancel()
 			}
-			atomic.AddInt64(&pc.State, item)
+			atomic.AddInt64(&task.State, item)
 			time.Sleep(1 * time.Millisecond)
 		},
 	).Wait()
@@ -148,8 +147,8 @@ func TestProcessConcurrentlyWithOnCompleteHook(t *testing.T) {
 	got := Process(
 		context.Background(),
 		[]int{1, 2, 3, 4, 5},
-		func(pc *Task[*testStateWithOnCompleteHook], item int) {
-			atomic.AddInt64(&pc.State.Sum, int64(item))
+		func(task *Task[*testStateWithOnCompleteHook], item int) {
+			atomic.AddInt64(&task.State.Sum, int64(item))
 		},
 		WithState(&testStateWithOnCompleteHook{}),
 		WithOnFinish(func(state Result[*testStateWithOnCompleteHook]) {
@@ -181,8 +180,8 @@ func TestProcessConcurrentlyWithDifferentTypes(t *testing.T) {
 	got := Process(
 		context.Background(),
 		people,
-		func(pc *Task[Stats], person Person) {
-			atomic.AddInt64(&pc.State.TotalAge, person.Age)
+		func(task *Task[Stats], person Person) {
+			atomic.AddInt64(&task.State.TotalAge, person.Age)
 		},
 	).Wait()
 
@@ -191,28 +190,23 @@ func TestProcessConcurrentlyWithDifferentTypes(t *testing.T) {
 }
 
 func TestProcessConcurrentlyWithStringItems(t *testing.T) {
-	type StringProcessor struct {
-		result string
-		mu     sync.Mutex
-	}
-
 	items := []string{"hello", "world", "test", "concurrent"}
 
 	got := Process(
 		context.Background(),
 		items,
-		func(pc *Task[StringProcessor], item string) {
-			pc.State.mu.Lock()
-			defer pc.State.mu.Unlock()
-			pc.State.result += item + " "
+		func(task *Task[string], item string) {
+			task.WithLock(func() {
+				task.State += item + " "
+			})
 		},
 	).Wait()
 
 	assert.Equal(t, 4, got.ProcessedCount, "Expected count to be 4")
-	assert.Contains(t, got.State.result, "hello", "Expected 'hello' to be in result")
-	assert.Contains(t, got.State.result, "world", "Expected 'world' to be in result")
-	assert.Contains(t, got.State.result, "test", "Expected 'test' to be in result")
-	assert.Contains(t, got.State.result, "concurrent", "Expected 'concurrent' to be in result")
+	assert.Contains(t, got.State, "hello", "Expected 'hello' to be in result")
+	assert.Contains(t, got.State, "world", "Expected 'world' to be in result")
+	assert.Contains(t, got.State, "test", "Expected 'test' to be in result")
+	assert.Contains(t, got.State, "concurrent", "Expected 'concurrent' to be in result")
 }
 
 func TestProcessConcurrentlyWithTimeout(t *testing.T) {
@@ -222,8 +216,8 @@ func TestProcessConcurrentlyWithTimeout(t *testing.T) {
 	got := Process(
 		ctx,
 		items,
-		func(pc *Task[int64], item int64) {
-			atomic.AddInt64(&pc.State, item)
+		func(task *Task[int64], item int64) {
+			atomic.AddInt64(&task.State, item)
 			time.Sleep(2 * time.Millisecond) // Simulate work
 		},
 		WithMaxWorkers[int64](3),
@@ -236,8 +230,8 @@ func TestProcessConcurrentlyWithTimeout(t *testing.T) {
 }
 
 func TestNewProcessor(t *testing.T) {
-	handler := func(pc *Task[int64], item int64) {
-		atomic.AddInt64(&pc.State, item)
+	handler := func(task *Task[int64], item int64) {
+		atomic.AddInt64(&task.State, item)
 	}
 
 	processor := NewProcessor(handler, WithMaxWorkers[int64](2))
@@ -257,8 +251,10 @@ func TestProcessorWithOptions(t *testing.T) {
 		Sum int64
 	}
 
-	handler := func(pc *Task[Counter], item int64) {
-		atomic.AddInt64(&pc.State.Sum, item)
+	handler := func(task *Task[Counter], item int64) {
+		task.WithLock(func() {
+			task.State.Sum += item
+		})
 	}
 
 	var finalSum int64
@@ -285,8 +281,8 @@ func TestWithStateFunc(t *testing.T) {
 		Value       int64
 	}
 
-	handler := func(pc *Task[DynamicState], item int64) {
-		atomic.AddInt64(&pc.State.Value, item)
+	handler := func(task *Task[DynamicState], item int64) {
+		atomic.AddInt64(&task.State.Value, item)
 	}
 
 	got := Process(
@@ -311,11 +307,11 @@ func TestPanicHandlingInHandler(t *testing.T) {
 	got := Process(
 		context.Background(),
 		items,
-		func(pc *Task[int64], item int64) {
+		func(task *Task[int64], item int64) {
 			if item == 2 {
 				panic("test panic")
 			}
-			atomic.AddInt64(&pc.State, item)
+			atomic.AddInt64(&task.State, item)
 		},
 	).Wait()
 
@@ -334,8 +330,10 @@ func TestPanicHandlingInOnFinish(t *testing.T) {
 	got := Process(
 		context.Background(),
 		[]int64{1, 2, 3},
-		func(pc *Task[TestState], item int64) {
-			atomic.AddInt64(&pc.State.Value, item)
+		func(task *Task[TestState], item int64) {
+			task.WithLock(func() {
+				task.State.Value += item
+			})
 		},
 		WithState(TestState{}),
 		WithOnFinish(func(result Result[TestState]) {
@@ -355,8 +353,8 @@ func TestTaskMethods(t *testing.T) {
 	task := Process(
 		context.Background(),
 		items,
-		func(pc *Task[int64], item int64) {
-			atomic.AddInt64(&pc.State, item)
+		func(task *Task[int64], item int64) {
+			atomic.AddInt64(&task.State, item)
 			time.Sleep(5 * time.Millisecond) // Longer sleep to ensure cancel works
 		},
 		WithMaxWorkers[int64](1), // Single worker to make timing more predictable
@@ -388,8 +386,8 @@ func TestTaskMethodsWithEmptyItems(t *testing.T) {
 	task := Process(
 		context.Background(),
 		[]int64{},
-		func(pc *Task[int64], item int64) {
-			atomic.AddInt64(&pc.State, item)
+		func(task *Task[int64], item int64) {
+			atomic.AddInt64(&task.State, item)
 		},
 	)
 
@@ -408,8 +406,10 @@ func TestEdgeCases(t *testing.T) {
 			Process(
 				context.Background(),
 				[]int64{1, 2, 3},
-				func(pc *Task[int64], item int64) {
-					atomic.AddInt64(&pc.State, item)
+				func(task *Task[int64], item int64) {
+					task.WithLock(func() {
+						task.State += item
+					})
 				},
 				WithMaxWorkers[int64](-1),
 			).Wait()
@@ -420,8 +420,10 @@ func TestEdgeCases(t *testing.T) {
 		got := Process(
 			context.Background(),
 			[]int64{1, 2},
-			func(pc *Task[int64], item int64) {
-				atomic.AddInt64(&pc.State, item)
+			func(task *Task[int64], item int64) {
+				task.WithLock(func() {
+					task.State += item
+				})
 			},
 			WithMaxWorkers[int64](10),
 		).Wait()
@@ -448,11 +450,13 @@ func TestErrorCollection(t *testing.T) {
 	got := Process(
 		context.Background(),
 		items,
-		func(pc *Task[int64], item int64) {
+		func(task *Task[int64], item int64) {
 			if item == 2 || item == 4 {
 				panic(fmt.Sprintf("panic for item %d", item))
 			}
-			atomic.AddInt64(&pc.State, item)
+			task.WithLock(func() {
+				task.State += item
+			})
 		},
 	).Wait()
 
@@ -471,23 +475,22 @@ func TestErrorCollection(t *testing.T) {
 
 func TestConcurrentAccessToTaskState(t *testing.T) {
 	type Counter struct {
-		Value int64
-		mu    sync.Mutex
+		Value int
 	}
 
-	items := slices.Repeat([]int64{1}, 1000)
+	items := slices.Repeat([]int{1}, 1000)
 	got := Process(
 		context.Background(),
 		items,
-		func(pc *Task[Counter], item int64) {
-			pc.State.mu.Lock()
-			pc.State.Value += item
-			pc.State.mu.Unlock()
+		func(task *Task[Counter], item int) {
+			task.WithLock(func() {
+				task.State.Value += item
+			})
 		},
 		WithMaxWorkers[Counter](10),
 	).Wait()
 
-	assert.Equal(t, int64(1000), got.State.Value, "Expected value to be 1000")
+	assert.Equal(t, 1000, got.State.Value, "Expected value to be 1000")
 	assert.Equal(t, 1000, got.ProcessedCount, "Expected processed count to be 1000")
 	assert.True(t, got.IsFinished, "Expected task to be finished")
 	assert.False(t, got.IsCanceled, "IsCanceled should be false")
